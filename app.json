@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "gallatic",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true
@@ -19,7 +19,8 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.anonymous.gallatic"
     },
     "web": {
       "output": "static",
@@ -37,6 +38,17 @@
           "dark": {
             "backgroundColor": "#000000"
           }
+        }
+      ],
+      [
+        "expo-navigation-bar",
+        {
+          "backgroundColor": "#fff",
+          "barStyle": "dark",
+          "borderColor": "#1f2937",
+          "visibility": "visible",
+          "behavior": "inset-swipe",
+          "position": "relative"
         }
       ]
     ],

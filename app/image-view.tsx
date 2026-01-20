@@ -1,23 +1,31 @@
 import { BlurView } from 'expo-blur';
+import { Image as ExpoImage } from 'expo-image';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import { router, useLocalSearchParams } from 'expo-router';
-import { ChevronLeft, Heart, Info, MoreVertical, Settings2, Share, Trash2 } from 'lucide-react-native';
-import { Dimensions, ImageSourcePropType, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ChevronLeft, Heart, Info, MoreVertical, Play, Pause, Settings2, Share, Trash2 } from 'lucide-react-native';
+import { Dimensions, StyleSheet, Text, TouchableOpacity, View, ActivityIndicator } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withDecay, withSpring } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useState, useCallback, useRef, useEffect } from 'react';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
+const AnimatedImage = Animated.createAnimatedComponent(ExpoImage);
+
 type Props = {
   imageSize: number;
-  stickerSource: ImageSourcePropType;
+  stickerSource: any;
   onClose: () => void;
   onTranslateYChange: (value: number) => void;
   onScaleChange: (scale: number) => void;
   onHudToggle: () => void;
+  onLoadStart?: () => void;
+  onLoadEnd?: () => void;
+  onError?: () => void;
 };
 
-export function EmojiSticker({ imageSize, stickerSource, onClose, onTranslateYChange, onScaleChange, onHudToggle }: Props) {
+export function EmojiSticker({ imageSize, stickerSource, onClose, onTranslateYChange, onScaleChange, onHudToggle, onLoadStart, onLoadEnd, onError }: Props) {
   const scaleImage = useSharedValue(imageSize);
   const savedScale = useSharedValue(imageSize);
   const translateX = useSharedValue(0);
@@ -139,10 +147,14 @@ export function EmojiSticker({ imageSize, stickerSource, onClose, onTranslateYCh
     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
       <GestureDetector gesture={composed}>
         <Animated.View style={containerStyle}>
-          <Animated.Image
+          <AnimatedImage
             source={stickerSource}
-            resizeMode="contain"
+            cachePolicy="disk"
+            contentFit="contain"
             style={[imageStyle, { width: imageSize, height: imageSize }]}
+            onLoadStart={onLoadStart}
+            onLoadEnd={onLoadEnd}
+            onError={onError}
           />
         </Animated.View>
       </GestureDetector>
@@ -156,27 +168,95 @@ export default function ImageView() {
   const isZoomed = useSharedValue(false);
 
   const imageUri = Array.isArray(params.uri) ? params.uri[0] : params.uri as string;
+  const isVideo = imageUri.match(/\.(mp4|mov|avi|mkv|webm)$/i) !== null;
+  
+  const [isLoading, setIsLoading] = useState(true);
+  const [hasError, setHasError] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [showControls, setShowControls] = useState(true);
 
-  const handleClose = () => {
+  const player = useVideoPlayer(imageUri || '');
+  const videoRef = useRef<VideoView>(null);
+
+  const handleClose = useCallback(() => {
+    if (isPlaying) {
+      player.pause();
+      setIsPlaying(false);
+    }
     router.back();
-  };
+  }, [isPlaying, player]);
 
-  const handleTranslateYChange = (value: number) => {
+  const handleTranslateYChange = useCallback((value: number) => {
     if (!isZoomed.value) {
       barOpacity.value = Math.max(0, 1 - value / 200);
     }
-  };
+  }, [barOpacity, isZoomed]);
 
-  const handleScaleChange = (scale: number) => {
+  const handleScaleChange = useCallback((scale: number) => {
     isZoomed.value = scale > SCREEN_WIDTH;
     if (isZoomed.value) {
       barOpacity.value = 0;
     }
-  };
+  }, [barOpacity, isZoomed]);
 
-  const handleHudToggle = () => {
+  const handleHudToggle = useCallback(() => {
     barOpacity.value = barOpacity.value > 0.5 ? 0 : 1;
-  };
+    setShowControls(!showControls);
+  }, [barOpacity, showControls]);
+
+  const handleImageLoadStart = useCallback(() => {
+    setIsLoading(true);
+    setHasError(false);
+  }, []);
+
+  const handleImageLoadEnd = useCallback(() => {
+    setIsLoading(false);
+  }, []);
+
+  const handleImageError = useCallback(() => {
+    setIsLoading(false);
+    setHasError(true);
+  }, []);
+
+  const togglePlayback = useCallback(() => {
+    if (isPlaying) {
+      player.pause();
+      setIsPlaying(false);
+    } else {
+      player.play();
+      setIsPlaying(true);
+    }
+  }, [isPlaying, player]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (showControls && !isZoomed.value) {
+        setShowControls(false);
+      }
+    }, 3000);
+
+    return () => clearTimeout(timer);
+  }, [showControls, isZoomed.value]);
+
+  useEffect(() => {
+    const subscription = player.addListener('statusChange', (status: any) => {
+      if (status.isLoaded) {
+        setIsLoading(false);
+        setHasError(false);
+        setDuration(status.durationMillis / 1000);
+      }
+      if (status.isPlaying !== undefined) {
+        setIsPlaying(status.isPlaying);
+      }
+      if (status.positionMillis !== undefined) {
+        setCurrentTime(status.positionMillis / 1000);
+      }
+    });
+
+    return () => subscription.remove();
+  }, [player]);
 
   const headerStyle = useAnimatedStyle(() => ({
     opacity: barOpacity.value,
@@ -186,10 +266,14 @@ export default function ImageView() {
     opacity: barOpacity.value,
   }));
 
+  const formatTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
   return (
     <View style={styles.container}>
-
-      {/* Controls */}
       <View style={[StyleSheet.absoluteFill]} pointerEvents="box-none">
         <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
           {/* Header */}
@@ -202,7 +286,7 @@ export default function ImageView() {
             <BlurView experimentalBlurMethod="dimezisBlurView" intensity={40} tint="dark" style={[styles.Button, styles.dateBlurView]}>
               <View style={styles.dateContainer}>
                 <Text style={styles.dateText}>25 December</Text>
-                <Text style={styles.timeText}>21:00</Text>
+                <Text style={styles.timeText}>{isVideo ? formatTime(currentTime) : '21:00'}</Text>
               </View>
             </BlurView>
             <BlurView experimentalBlurMethod="dimezisBlurView" intensity={40} tint="dark" style={styles.Button}>
@@ -212,14 +296,42 @@ export default function ImageView() {
             </BlurView>
           </Animated.View>
 
-          <EmojiSticker
-            imageSize={SCREEN_WIDTH}
-            stickerSource={{ uri: imageUri }}
-            onClose={handleClose}
-            onTranslateYChange={handleTranslateYChange}
-            onScaleChange={handleScaleChange}
-            onHudToggle={handleHudToggle}
-          />
+          {!isVideo && (
+            <EmojiSticker
+              imageSize={SCREEN_WIDTH}
+              stickerSource={{ uri: imageUri }}
+              onClose={handleClose}
+              onTranslateYChange={handleTranslateYChange}
+              onScaleChange={handleScaleChange}
+              onHudToggle={handleHudToggle}
+              onLoadStart={handleImageLoadStart}
+              onLoadEnd={handleImageLoadEnd}
+              onError={handleImageError}
+            />
+          )}
+
+          {isVideo && (
+            <VideoView
+              ref={videoRef}
+              style={styles.video}
+              player={player}
+              nativeControls={false}
+              allowsFullscreen
+              allowsPictureInPicture
+            />
+          )}
+
+          {isLoading && !isVideo && (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color="#fff" />
+            </View>
+          )}
+          {hasError && (
+            <View style={styles.errorContainer}>
+              <Text style={styles.errorText}>Failed to load image</Text>
+            </View>
+          )}
+
           {/* Bottom controls */}
           <Animated.View style={[styles.bottom, styles.bar, bottomStyle]}>
             <BlurView experimentalBlurMethod="dimezisBlurView" intensity={40} tint="dark" style={styles.Button}>
@@ -244,6 +356,24 @@ export default function ImageView() {
               </TouchableOpacity>
             </BlurView>
           </Animated.View>
+
+          {isVideo && showControls && (
+            <Animated.View style={[styles.videoControlsContainer, bottomStyle]}>
+              <BlurView experimentalBlurMethod="dimezisBlurView" intensity={40} tint="dark" style={styles.videoControlBlur}>
+                <TouchableOpacity onPress={togglePlayback} style={styles.playPauseButton}>
+                  {isPlaying ? <Pause size={28} color="white" /> : <Play size={28} color="white" />}
+                </TouchableOpacity>
+                <View style={styles.sliderContainer}>
+                  <Text style={styles.timeTextSmall}>{formatTime(currentTime)}</Text>
+                  <View style={styles.progressBar}>
+                    <View style={[styles.progressFill, { width: `${(currentTime / (duration || 1)) * 100}%` }]} />
+                    <View style={[styles.sliderThumb, { left: `${(currentTime / (duration || 1)) * 100}%` }]} />
+                  </View>
+                  <Text style={styles.timeTextSmall}>{formatTime(duration)}</Text>
+                </View>
+              </BlurView>
+            </Animated.View>
+          )}
         </SafeAreaView>
       </View>
     </View>
@@ -298,11 +428,60 @@ const styles = StyleSheet.create({
     right: 0,
     paddingTop: 16,
   },
-  imageContainer: {
+  videoControls: {
+    bottom: 100,
+  },
+  videoControlsContainer: {
     position: 'absolute',
+    bottom: 30,
+    left: 0,
+    right: 0,
+    paddingHorizontal: 20,
+  },
+  videoControlBlur: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 15,
+    paddingVertical: 10,
+    paddingHorizontal: 15,
+    borderRadius: 50,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.4)',
+  },
+  playPauseButton: {
+    padding: 5,
+  },
+  sliderContainer: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  progressBar: {
+    flex: 1,
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+    borderRadius: 2,
+    position: 'relative',
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#fff',
+    borderRadius: 2,
+  },
+  sliderThumb: {
+    position: 'absolute',
+    top: '50%',
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#fff',
+    marginTop: -6,
+  },
+  video: {
     width: SCREEN_WIDTH,
     height: SCREEN_WIDTH,
-    top: (SCREEN_HEIGHT - SCREEN_WIDTH) / 2,
+    backgroundColor: '#000',
   },
   dateText: {
     color: 'white',
@@ -312,5 +491,33 @@ const styles = StyleSheet.create({
   timeText: {
     color: 'rgba(255,255,255,0.7)',
     fontSize: 12,
+  },
+  timeTextSmall: {
+    color: 'rgba(255,255,255,0.9)',
+    fontSize: 11,
+    minWidth: 40,
+    textAlign: 'center',
+  },
+  loadingContainer: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    marginTop: -20,
+    marginLeft: -20,
+    zIndex: 2,
+  },
+  errorContainer: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    marginTop: -30,
+    marginLeft: -100,
+    width: 200,
+    alignItems: 'center',
+  },
+  errorText: {
+    color: '#fff',
+    fontSize: 16,
+    textAlign: 'center',
   },
 });

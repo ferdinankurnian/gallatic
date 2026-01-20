@@ -1,28 +1,273 @@
 import { BlurView } from 'expo-blur';
+import { Image as ExpoImage } from 'expo-image';
 import * as Haptics from 'expo-haptics';
-import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { Check, SquareCheckBig, X } from 'lucide-react-native';
-import { createContext, useContext } from 'react';
-import { Dimensions, Image, SectionList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Check, SquareCheckBig, X, Video } from 'lucide-react-native';
+import { createContext, useContext, useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { StyleSheet, Text, TouchableOpacity, View, ActivityIndicator, Alert, Dimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { FlashList } from '@shopify/flash-list';
 import { useSelection } from '@/context/SelectionContext';
+import { mediaLibraryScanner, ImageFile } from '@/services/mediaLibraryScanner';
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const SCREEN_WIDTH = Dimensions.get('window').width;
+const COLUMN_COUNT = 4;
+const IMAGE_SIZE = SCREEN_WIDTH / COLUMN_COUNT;
 
-interface ImageData {
-  id: string;
-  uri: string;
-}
+type ListItem = 
+  | { type: 'header'; title: string; count: number; images: ImageFile[] }
+  | { type: 'row'; id: string; images: ImageFile[] };
 
 interface TransitionContextType {
-  startTransition: (img: ImageData, layout: { x: number; y: number; width: number; height: number }) => void;
+  startTransition: (img: ImageFile, layout: { x: number; y: number; width: number; height: number }) => void;
 }
 
 const TransitionContext = createContext<TransitionContextType | null>(null);
 
+export default function Index() {
+  const { isSelectionMode, selectedImages, setSelectionMode, setSelectedImages } = useSelection();
+  const [allImages, setAllImages] = useState<ImageFile[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [hasNextPage, setHasNextPage] = useState(false);
+  const [endCursor, setEndCursor] = useState<string | undefined>(undefined);
+  
+  const isInitialLoad = useRef(true);
+
+  const navigateToImageView = (img: ImageFile) => {
+    router.push({
+      pathname: '/image-view',
+      params: {
+        uri: img.uri,
+        id: img.id,
+      },
+    });
+  };
+
+  const startTransition = (img: ImageFile, layout: { x: number; y: number; width: number; height: number }) => {
+    navigateToImageView(img);
+  };
+
+  const listData = useMemo(() => {
+    const groups = mediaLibraryScanner.groupByDate(allImages);
+    const items: ListItem[] = [];
+
+    groups.forEach(group => {
+      items.push({
+        type: 'header',
+        title: group.date,
+        count: group.count,
+        images: group.images,
+      });
+
+      for (let i = 0; i < group.images.length; i += COLUMN_COUNT) {
+        const rowImages = group.images.slice(i, i + COLUMN_COUNT);
+        items.push({
+          type: 'row',
+          id: `row-${group.date}-${i}`,
+          images: rowImages,
+        });
+      }
+    });
+
+    return items;
+  }, [allImages]);
+
+  const stickyHeaderIndices = useMemo(() => {
+    return listData
+      .map((item, index) => (item.type === 'header' ? index : -1))
+      .filter((index) => index !== -1);
+  }, [listData]);
+
+  const loadImages = useCallback(async (isRefresh = false) => {
+    if (isRefresh) setIsRefreshing(true);
+    else if (isInitialLoad.current) setIsLoading(true);
+
+    try {
+      const hasPermission = await mediaLibraryScanner.requestPermission();
+      if (!hasPermission) {
+        Alert.alert('Permission Required', 'Photo library permission is required.');
+        setIsLoading(false);
+        setIsRefreshing(false);
+        return;
+      }
+
+      // Load from cache first if initial load
+      if (isInitialLoad.current) {
+        const cached = await mediaLibraryScanner.loadFromCache();
+        if (cached && cached.length > 0) {
+          setAllImages(cached);
+          setIsLoading(false);
+          // Don't return, still fetch fresh data
+        }
+      }
+
+      const result = await mediaLibraryScanner.scanAllAssets(100, isRefresh ? undefined : endCursor);
+      
+      setAllImages(prev => {
+        if (isRefresh) return result.images;
+        // Filter out duplicates
+        const existingIds = new Set(prev.map(img => img.id));
+        const newImages = result.images.filter(img => !existingIds.has(img.id));
+        return [...prev, ...newImages];
+      });
+
+      setHasNextPage(result.hasNextPage);
+      setEndCursor(result.endCursor);
+    } catch (error) {
+      console.error('Error loading images:', error);
+    } finally {
+      setIsLoading(false);
+      setIsRefreshing(false);
+      isInitialLoad.current = false;
+    }
+  }, [endCursor]);
+
+  const toggleImageSelection = useCallback((imageId: string) => {
+    const newSet = new Set(selectedImages);
+    if (newSet.has(imageId)) {
+      newSet.delete(imageId);
+    } else {
+      newSet.add(imageId);
+    }
+    setSelectedImages(newSet);
+  }, [selectedImages, setSelectedImages]);
+
+  const handleLongPress = useCallback((imageId: string) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setSelectionMode(true);
+    const newSet = new Set(selectedImages);
+    newSet.add(imageId);
+    setSelectedImages(newSet);
+  }, [selectedImages, setSelectedImages, setSelectionMode]);
+
+  const renderItem = useCallback(({ item }: { item: ListItem }) => {
+    if (item.type === 'header') {
+      const allSelected = item.images.every(img => selectedImages.has(img.id));
+      return (
+        <View style={styles.sectionHeader}>
+          {isSelectionMode && (
+            <BlurView experimentalBlurMethod="dimezisBlurView" intensity={40} tint="dark" style={styles.Button}>
+              <TouchableOpacity
+                activeOpacity={1}
+                onPress={() => {
+                  const newSet = new Set(selectedImages);
+                  if (allSelected) {
+                    item.images.forEach(img => newSet.delete(img.id));
+                  } else {
+                    item.images.forEach(img => newSet.add(img.id));
+                  }
+                  setSelectedImages(newSet);
+                }}
+              >
+                <View style={[styles.headerCheckboxContainer, allSelected && styles.checkboxSelected]}>
+                  {allSelected && <Check size={16} color="white" />}
+                </View>
+              </TouchableOpacity>
+            </BlurView>
+          )}
+          <View style={styles.sectionHeaderContent}>
+            <Text style={styles.sectionTitle}>{item.title}</Text>
+            <Text style={styles.sectionCount}>{item.count} items</Text>
+          </View>
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.row}>
+        {item.images.map((img) => (
+          <ImageItem
+            key={img.id}
+            img={img}
+            isSelectionMode={isSelectionMode}
+            isSelected={selectedImages.has(img.id)}
+            onPress={() => toggleImageSelection(img.id)}
+            onLongPress={() => handleLongPress(img.id)}
+          />
+        ))}
+      </View>
+    );
+  }, [isSelectionMode, selectedImages, toggleImageSelection, handleLongPress, setSelectedImages]);
+
+  const handleEndReached = useCallback(() => {
+    if (hasNextPage && !isLoading && !isRefreshing) {
+      loadImages(false);
+    }
+  }, [hasNextPage, isLoading, isRefreshing, loadImages]);
+
+  useEffect(() => {
+    loadImages();
+  }, [loadImages]);
+
+  return (
+    <TransitionContext.Provider value={{ startTransition }}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: '#000' }} edges={['top']}>
+        {isLoading && allImages.length === 0 ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#fff" />
+            <Text style={styles.loadingText}>Scanning photos...</Text>
+          </View>
+        ) : (
+          <View style={{ flex: 1 }}>
+            <BlurView
+              experimentalBlurMethod="dimezisBlurView"
+              intensity={40}
+              tint="dark"
+              style={[styles.selectButton, styles.Button, { paddingHorizontal: isSelectionMode ? 13 : 10 }]}
+            >
+              {isSelectionMode && (
+                <TouchableOpacity
+                  style={styles.selectButtonContainer}
+                  activeOpacity={1}
+                  onPress={() => {
+                    const allSelected = allImages.every(img => selectedImages.has(img.id));
+                    if (allSelected) {
+                      setSelectedImages(new Set());
+                    } else {
+                      setSelectedImages(new Set(allImages.map(img => img.id)));
+                    }
+                  }}
+                >
+                  <View style={[styles.headerCheckboxContainer, allImages.every(img => selectedImages.has(img.id)) && styles.checkboxSelected]}>
+                    {allImages.every(img => selectedImages.has(img.id)) && <Check size={16} color="white" />}
+                  </View>
+                  <Text style={styles.selectButtonText}>Select All</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                activeOpacity={1}
+                onPress={() => {
+                  setSelectionMode(!isSelectionMode);
+                  if (isSelectionMode) setSelectedImages(new Set());
+                }}
+              >
+                {isSelectionMode ? <X size={24} color="white" /> : <SquareCheckBig size={24} color="white" />}
+              </TouchableOpacity>
+            </BlurView>
+
+            <FlashList
+              data={listData}
+              renderItem={renderItem}
+              keyExtractor={(item) => item.type === 'header' ? `header-${item.title}` : item.id}
+              estimatedItemSize={IMAGE_SIZE + 20}
+              onEndReached={handleEndReached}
+              onEndReachedThreshold={0.5}
+              onRefresh={() => loadImages(true)}
+              refreshing={isRefreshing}
+              contentContainerStyle={{ paddingBottom: 100 }}
+              stickyHeaderIndices={stickyHeaderIndices}
+              getItemType={(item) => item.type}
+            />
+          </View>
+        )}
+      </SafeAreaView>
+    </TransitionContext.Provider>
+  );
+}
+
 interface ImageItemProps {
-  img: ImageData;
+  img: ImageFile;
   isSelectionMode: boolean;
   isSelected: boolean;
   onPress: () => void;
@@ -37,9 +282,10 @@ const ImageItem = ({ img, isSelectionMode, isSelected, onPress, onLongPress }: I
       onPress();
       return;
     }
-
     context?.startTransition(img, { x: 0, y: 0, width: 0, height: 0 });
   };
+
+  const isVideo = img.uri.match(/\.(mp4|mov|avi|mkv|webm)$/i) !== null;
 
   return (
     <TouchableOpacity
@@ -47,225 +293,41 @@ const ImageItem = ({ img, isSelectionMode, isSelected, onPress, onLongPress }: I
       onPress={handlePress}
       onLongPress={onLongPress}
       delayLongPress={200}
+      activeOpacity={0.8}
     >
-      <Image
+      <ExpoImage
         source={{ uri: img.uri }}
         style={[styles.image, isSelectionMode && isSelected && styles.imageSelected]}
+        contentFit="cover"
+        cachePolicy="disk"
+        recyclingKey={img.id}
+        transition={200}
       />
-      {isSelectionMode && (
-        <View style={[styles.checkboxContainer, isSelected && styles.checkboxSelected]}>
-          {isSelected && <Check size={16} color="white" />}
+      {isVideo && (
+        <View style={styles.videoIconContainer}>
+          <Video size={16} color="white" />
         </View>
+      )}
+      {isSelectionMode && (
+         <View style={[styles.checkboxContainer, isSelected && styles.checkboxSelected]}>
+           {isSelected && <Check size={14} color="white" />}
+         </View>
       )}
     </TouchableOpacity>
   );
 };
 
-export default function Index() {
-  const { isSelectionMode, selectedImages, setSelectionMode, setSelectedImages } = useSelection();
-
-
-
-  const navigateToImageView = (img: ImageData) => {
-    router.push({
-      pathname: '/image-view',
-      params: {
-        uri: img.uri,
-        id: img.id,
-      },
-    });
-  };
-
-  const startTransition = (img: ImageData, layout: { x: number; y: number; width: number; height: number }) => {
-    navigateToImageView(img);
-  };
-
-  const groupImagesIntoRows = (images: ImageData[]) => {
-    const rows: { id: string; images: ImageData[] }[] = [];
-    for (let i = 0; i < images.length; i += 4) {
-      rows.push({
-        id: `row-${i}`,
-        images: images.slice(i, i + 4),
-      });
-    }
-    return rows;
-  };
-
-  const toggleImageSelection = (imageId: string) => {
-    const newSet = new Set(selectedImages);
-    if (newSet.has(imageId)) {
-      newSet.delete(imageId);
-    } else {
-      newSet.add(imageId);
-    }
-    setSelectedImages(newSet);
-  };
-
-  const selectAllInSection = (images: ImageData[]) => {
-    const newSet = new Set(selectedImages);
-    images.forEach(img => newSet.add(img.id));
-    setSelectedImages(newSet);
-  };
-
-  const handleLongPress = (imageId: string) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    setSelectionMode(true);
-    const newSet = new Set(selectedImages);
-    newSet.add(imageId);
-    setSelectedImages(newSet);
-  };
-
-  const sections = [
-    {
-      title: 'Today',
-      count: 12,
-      images: [
-        { id: '1', uri: 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=400&h=400&fit=crop' },
-        { id: '2', uri: 'https://images.unsplash.com/photo-1469474968028-56623f02e42e?w=400&h=400&fit=crop' },
-        { id: '3', uri: 'https://images.unsplash.com/photo-1447752875215-b2761acb3c5d?w=400&h=400&fit=crop' },
-        { id: '4', uri: 'https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=400&h=400&fit=crop' },
-        { id: '5', uri: 'https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=400&h=400&fit=crop' },
-        { id: '6', uri: 'https://images.unsplash.com/photo-1426604966848-d7adac402bff?w=400&h=400&fit=crop' },
-        { id: '7', uri: 'https://images.unsplash.com/photo-1501594907352-04cda38ebc29?w=400&h=400&fit=crop' },
-        { id: '8', uri: 'https://images.unsplash.com/photo-1472214103451-9374bd1c798e?w=400&h=400&fit=crop' },
-        { id: '9', uri: 'https://images.unsplash.com/photo-1465146344425-f00d5f5c8f07?w=400&h=400&fit=crop' },
-        { id: '10', uri: 'https://images.unsplash.com/photo-1475924156734-496f6cac6ec1?w=400&h=400&fit=crop' },
-        { id: '11', uri: 'https://images.unsplash.com/photo-1418065460487-3e41a6c84dc5?w=400&h=400&fit=crop' },
-        { id: '12', uri: 'https://images.unsplash.com/photo-1519904981063-b0cf448d479e?w=400&h=400&fit=crop' },
-      ],
-    },
-    {
-      title: 'Yesterday',
-      count: 8,
-      images: [
-        { id: '13', uri: 'https://images.unsplash.com/photo-1476514525535-07fb3b4ae5f1?w=400&h=400&fit=crop' },
-        { id: '14', uri: 'https://images.unsplash.com/photo-1433086966358-54859d0ed716?w=400&h=400&fit=crop' },
-        { id: '15', uri: 'https://images.unsplash.com/photo-1502082553048-f009c37129b9?w=400&h=400&fit=crop' },
-        { id: '16', uri: 'https://images.unsplash.com/photo-1504893524553-b855bce32c67?w=400&h=400&fit=crop' },
-        { id: '17', uri: 'https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?w=400&h=400&fit=crop' },
-        { id: '18', uri: 'https://images.unsplash.com/photo-1488646953014-85cb44e25828?w=400&h=400&fit=crop' },
-        { id: '19', uri: 'https://images.unsplash.com/photo-1445964047600-cdbdb873673d?w=400&h=400&fit=crop' },
-        { id: '20', uri: 'https://images.unsplash.com/photo-1518837695005-2083093ee35b?w=400&h=400&fit=crop' },
-      ],
-    },
-    {
-      title: '11 Jan',
-      count: 7,
-      images: [
-        { id: '21', uri: 'https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?w=400&h=400&fit=crop' },
-        { id: '22', uri: 'https://images.unsplash.com/photo-1454496522488-7a8e488e8606?w=400&h=400&fit=crop' },
-        { id: '23', uri: 'https://images.unsplash.com/photo-1446329813274-7c9036bd9a1f?w=400&h=400&fit=crop' },
-        { id: '24', uri: 'https://images.unsplash.com/photo-1484100356142-db6ab6244067?w=400&h=400&fit=crop' },
-        { id: '25', uri: 'https://images.unsplash.com/photo-1485550409059-9afb054cada4?w=400&h=400&fit=crop' },
-        { id: '26', uri: 'https://images.unsplash.com/photo-1444080748397-f442aa95c3e5?w=400&h=400&fit=crop' },
-        { id: '27', uri: 'https://images.unsplash.com/photo-1533460004989-cef01064af7e?w=400&h=400&fit=crop' },
-      ],
-    },
-  ];
-
-  const transformedSections = sections.map(section => ({
-    title: section.title,
-    count: section.count,
-    images: section.images,
-    data: groupImagesIntoRows(section.images),
-  }));
-
-  return (
-    <TransitionContext.Provider value={{ startTransition }}>
-      <SafeAreaView style={{ flex: 1, backgroundColor: '#000' }}>
-        <BlurView
-          experimentalBlurMethod="dimezisBlurView"
-          intensity={40}
-          tint="dark"
-          style={[styles.selectButton, styles.Button, { paddingHorizontal: isSelectionMode ? 13 : 10 }]}
-        >
-          {isSelectionMode && (
-            <TouchableOpacity
-              style={styles.selectButtonContainer}
-              activeOpacity={1}
-              onPress={() => {
-                const allImages = sections.flatMap(s => s.images);
-                const allSelected = allImages.every(img => selectedImages.has(img.id));
-                if (allSelected) {
-                  setSelectedImages(new Set());
-                } else {
-                  setSelectedImages(new Set(allImages.map(img => img.id)));
-                }
-              }}
-            >
-              <View style={[styles.headerCheckboxContainer, sections.flatMap(s => s.images).every(img => selectedImages.has(img.id)) && styles.checkboxSelected]}>
-                {sections.flatMap(s => s.images).every(img => selectedImages.has(img.id)) && <Check size={16} color="white" />}
-              </View>
-              <Text style={styles.selectButtonText}>Select All</Text>
-            </TouchableOpacity>
-          )}
-          <TouchableOpacity
-            activeOpacity={1}
-            onPress={() => {
-              setSelectionMode(!isSelectionMode);
-              if (isSelectionMode) setSelectedImages(new Set());
-            }}
-          >
-            {isSelectionMode ? <X size={24} color="white" /> : <SquareCheckBig size={24} color="white" />}
-          </TouchableOpacity>
-        </BlurView>
-
-        <SectionList
-          sections={transformedSections}
-          keyExtractor={(item) => item.id}
-          overScrollMode="never"
-          stickySectionHeadersEnabled={true}
-          contentContainerStyle={{ paddingBottom: 100 }}
-          renderSectionHeader={({ section }) => (
-            <LinearGradient colors={['#000000', 'rgba(0,0,0,0)']} style={styles.sectionHeader}>
-              {isSelectionMode && (
-                <BlurView experimentalBlurMethod="dimezisBlurView" intensity={40} tint="dark" style={styles.Button}>
-                  <TouchableOpacity
-                    activeOpacity={1}
-                    onPress={() => {
-                      const allSelected = section.images.every(img => selectedImages.has(img.id));
-                      if (allSelected) {
-                        const newSet = new Set(selectedImages);
-                        section.images.forEach(img => newSet.delete(img.id));
-                        setSelectedImages(newSet);
-                      } else {
-                        selectAllInSection(section.images);
-                      }
-                    }}
-                  >
-                    <View style={[styles.headerCheckboxContainer, section.images.every(img => selectedImages.has(img.id)) && styles.checkboxSelected]}>
-                      {section.images.every(img => selectedImages.has(img.id)) && <Check size={16} color="white" />}
-                    </View>
-                  </TouchableOpacity>
-                </BlurView>
-              )}
-              <View style={styles.sectionHeaderContent}>
-                <Text style={styles.sectionTitle}>{section.title}</Text>
-                <Text style={styles.sectionCount}>{section.count} items</Text>
-              </View>
-            </LinearGradient>
-          )}
-          renderItem={({ item }) => (
-            <View style={styles.row}>
-              {item.images.map((img) => (
-                <ImageItem
-                  key={img.id}
-                  img={img}
-                  isSelectionMode={isSelectionMode}
-                  isSelected={selectedImages.has(img.id)}
-                  onPress={() => toggleImageSelection(img.id)}
-                  onLongPress={() => handleLongPress(img.id)}
-                />
-              ))}
-            </View>
-          )}
-        />
-      </SafeAreaView>
-    </TransitionContext.Provider>
-  );
-}
-
 const styles = StyleSheet.create({
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    color: '#fff',
+    marginTop: 16,
+    fontSize: 16,
+  },
   Button: {
     padding: 10,
     borderRadius: 50,
@@ -277,9 +339,9 @@ const styles = StyleSheet.create({
   },
   selectButton: {
     position: 'absolute',
-    top: 75,
+    top: 20,
     right: 20,
-    zIndex: 1,
+    zIndex: 10,
   },
   selectButtonContainer: {
     flexDirection: 'row',
@@ -297,44 +359,53 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     alignItems: 'center',
+    backgroundColor: '#000',
   },
   sectionHeaderContent: {
     flexDirection: 'column',
   },
   sectionTitle: {
     color: '#fff',
-    fontSize: 30,
+    fontSize: 24,
     fontWeight: 'bold',
   },
   sectionCount: {
     color: '#ffffffb7',
-    fontSize: 14,
-    marginTop: 4,
+    fontSize: 12,
+    marginTop: 2,
   },
   row: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
+    paddingHorizontal: 1,
   },
   imageContainer: {
     width: '25%',
-    paddingHorizontal: 2,
-    paddingVertical: 2,
+    aspectRatio: 1,
+    padding: 1,
   },
   image: {
-    width: '100%',
-    aspectRatio: 1,
+    flex: 1,
+    backgroundColor: '#1a1a1a',
   },
   imageSelected: {
-    opacity: 0.5,
+    opacity: 0.6,
+  },
+  videoIconContainer: {
+    position: 'absolute',
+    top: 5,
+    left: 5,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 10,
+    padding: 3,
   },
   checkboxContainer: {
     position: 'absolute',
-    top: 6,
-    right: 6,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    borderWidth: 2,
+    top: 5,
+    right: 5,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 1.5,
     borderColor: '#fff',
     backgroundColor: 'rgba(0,0,0,0.3)',
     justifyContent: 'center',
@@ -345,9 +416,9 @@ const styles = StyleSheet.create({
     borderColor: '#007AFF',
   },
   headerCheckboxContainer: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
     borderWidth: 2,
     borderColor: '#fff',
     backgroundColor: 'rgba(0,0,0,0.3)',

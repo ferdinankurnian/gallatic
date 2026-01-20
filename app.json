@@ -28,6 +28,7 @@
     },
     "plugins": [
       "expo-router",
+      "expo-media-library",
       [
         "expo-splash-screen",
         {
@@ -50,11 +51,27 @@
           "behavior": "inset-swipe",
           "position": "relative"
         }
-      ]
+      ],
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "expo-navigation-bar": {
+        "backgroundColor": "#fff",
+        "barStyle": "dark",
+        "borderColor": "#1f2937",
+        "visibility": "visible",
+        "behavior": "inset-swipe",
+        "position": "relative"
+      },
+      "eas": {
+        "projectId": "8e46b97d-ffb8-48ac-82a0-cfb7f5b0cdce"
+      }
+    },
+    "owner": "iydheko-space"
   }
 }
